@@ -36,7 +36,8 @@ uv run python -m puzzle_bot
 ```
 
 Commands:
-- `/puzzle` (DMs you a puzzle; reactions ✅/👍/👎 track solved/like/dislike; removing reactions clears your choice)
+- `/show_puzzle` (DMs you a puzzle; optional `min_ply`/`max_ply`; reactions ✅/👍/👎 track solved/like/dislike; removing reactions clears your choice)
 - `/stats` (your totals: attempted/solved/unseen/likes/dislikes)
+- `/solution <id>` (returns the solution link for a specific puzzle id; uses a file if the link is too long)
 
 Each puzzle DM shows the link (built from `PUZZLE_BASE_URL` + `uhp`), the spoilered solution, global attempts/solves, global likes/dislikes, and your personal status on that puzzle.

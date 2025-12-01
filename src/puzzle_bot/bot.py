@@ -44,7 +44,7 @@ class PuzzleBot(discord.Client):
         self.db: Optional[aiosqlite.Connection] = None
 
         # Register slash commands
-        for cmd in (self.puzzle_command, self.stats_command):
+        for cmd in (self.puzzle_command, self.stats_command, self.solution_command):
             cmd.binding = self
             self.tree.add_command(cmd)
 
@@ -126,8 +126,16 @@ class PuzzleBot(discord.Client):
             selection.row, likes, dislikes, attempts, solved, your_status
         )
 
-        # First message: info + reactions
-        dm_message = await dm_channel.send(note_prefix + message_body)
+        # First message: info + reactions + button
+        button = discord.ui.Button(
+            style=discord.ButtonStyle.primary,
+            label="Show solved position",
+            custom_id=f"solve|{selection.row['id']}",
+        )
+        view = discord.ui.View()
+        view.add_item(button)
+
+        dm_message = await dm_channel.send(note_prefix + message_body, view=view)
         for emoji in (CHECK_EMOJI, UPVOTE_EMOJI, DOWNVOTE_EMOJI):
             try:
                 await dm_message.add_reaction(emoji)
@@ -164,6 +172,33 @@ class PuzzleBot(discord.Client):
             f"Votes: {stats['liked']} 👍 / {stats['disliked']} 👎",
         ]
         await interaction.response.send_message("\n".join(lines), ephemeral=bool(interaction.guild))
+
+    @app_commands.command(name="solution", description="Get the solution link for a puzzle id")
+    @app_commands.describe(puzzle_id="Puzzle id to fetch the solution for")
+    async def solution_command(self, interaction: discord.Interaction, puzzle_id: int) -> None:
+        assert self.db is not None
+        async with self.db.execute("SELECT * FROM puzzles WHERE id = ?", (puzzle_id,)) as cur:
+            row = await cur.fetchone()
+        if not row:
+            await interaction.response.send_message(
+                f"Puzzle {puzzle_id} not found.", ephemeral=bool(interaction.guild)
+            )
+            return
+
+        link_url = self._build_solution_link(row)
+        link_text = f"[Solution {puzzle_id}]({link_url})"
+        if len(link_text) <= 2000:
+            await interaction.response.send_message(link_text, ephemeral=bool(interaction.guild))
+        else:
+            note = (
+                "Solution link is too long, sending it as a file to get around Discord's message limit. "
+                "Please copy it manually."
+            )
+            await interaction.response.send_message(
+                note,
+                ephemeral=bool(interaction.guild),
+                file=discord.File(io.StringIO(link_url), filename="solution_link.txt"),
+            )
 
     # Reaction handling --------------------------------------------------
 
@@ -235,12 +270,68 @@ class PuzzleBot(discord.Client):
             f"global: {attempts} attempts / {solves} solves | votes: {likes} 👍 / {dislikes} 👎",
             f"your status: {your_status}",
             "React with ✅ when solved, 👍 to like, 👎 to dislike. Removing reactions clears your choice.",
+            "The solution link opens the final position after applying the solution; use the move list to rewind.",
         ]
         return "\n".join(lines)
 
     def _build_link(self, row: discord.utils.SequenceProxy) -> str:
         uhp = row["uhp"]
         return f"{self.settings.base_url}?uhp={quote(uhp, safe='')}"
+
+    def _build_solution_link(self, row: discord.utils.SequenceProxy) -> str:
+        uhp = row["uhp"]
+        solution = row["solution"]
+        combined = f"{uhp};{solution}"
+        return f"{self.settings.base_url}?uhp={quote(combined, safe='')}"
+
+    async def on_interaction(self, interaction: discord.Interaction) -> None:
+        # Handle button interactions for solution
+        if interaction.type == discord.InteractionType.component and interaction.data:
+            custom_id = interaction.data.get("custom_id")
+            if custom_id and custom_id.startswith("solve|"):
+                puzzle_id_str = custom_id.split("|", 1)[1]
+                try:
+                    puzzle_id = int(puzzle_id_str)
+                except ValueError:
+                    await interaction.response.send_message(
+                        "Invalid puzzle id.", ephemeral=True
+                    )
+                    return
+                if not self.db:
+                    await interaction.response.send_message(
+                        "Database not ready.", ephemeral=True
+                    )
+                    return
+                async with self.db.execute("SELECT * FROM puzzles WHERE id = ?", (puzzle_id,)) as cur:
+                    row = await cur.fetchone()
+                if not row:
+                    await interaction.response.send_message(
+                        f"Puzzle {puzzle_id} not found.", ephemeral=True
+                    )
+                    return
+
+                link_url = self._build_solution_link(row)
+                link_text = f"[Solution {puzzle_id}]({link_url})"
+                if len(link_text) <= 2000:
+                    await interaction.response.send_message(link_text, ephemeral=True)
+                else:
+                    note = (
+                        "Solution link is too long, sending it as a file to get around Discord's message limit. "
+                        "Please copy it manually."
+                    )
+                    await interaction.response.send_message(
+                        note,
+                        ephemeral=True,
+                        file=discord.File(io.StringIO(link_url), filename="solution_link.txt"),
+                    )
+                return
+
+        # Let the command tree handle slash commands; ignore if no response needed
+        try:
+            await self.tree.on_interaction(interaction)
+        except AttributeError:
+            # Fallback for older discord.py versions that don't expose on_interaction
+            pass
 
     async def _fetch_message(self, payload: discord.RawReactionActionEvent) -> Optional[discord.Message]:
         try:
