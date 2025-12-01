@@ -10,43 +10,64 @@ class SelectedPuzzle:
     status: str  # "new", "unsolved", or "all_solved"
 
 
-async def select_puzzle_for_user(conn: aiosqlite.Connection, user_id: str) -> Optional[SelectedPuzzle]:
+async def select_puzzle_for_user(
+    conn: aiosqlite.Connection,
+    user_id: str,
+    min_ply: Optional[int] = None,
+    max_ply: Optional[int] = None,
+) -> Optional[SelectedPuzzle]:
+    ply_clause = ""
+    params_unseen = [user_id]
+    params_unsolved = [user_id]
+    params_any: list = []
+
+    if min_ply is not None:
+        ply_clause += " AND p.ply >= ?"
+        params_unseen.append(min_ply)
+        params_unsolved.append(min_ply)
+        params_any.append(min_ply)
+    if max_ply is not None:
+        ply_clause += " AND p.ply <= ?"
+        params_unseen.append(max_ply)
+        params_unsolved.append(max_ply)
+        params_any.append(max_ply)
+    # Exclude NULL ply only when min_ply is specified
+    if min_ply is not None:
+        ply_clause += " AND p.ply IS NOT NULL"
+
     # 1) unseen
-    async with conn.execute(
-        """
+    query_unseen = f"""
         SELECT p.* FROM puzzles p
         WHERE NOT EXISTS (
             SELECT 1 FROM user_puzzles up
             WHERE up.user_id = ? AND up.puzzle_id = p.id
         )
+        {ply_clause}
         ORDER BY RANDOM()
         LIMIT 1
-        """,
-        (user_id,),
-    ) as cur:
+    """
+    async with conn.execute(query_unseen, tuple(params_unseen)) as cur:
         row = await cur.fetchone()
         if row:
             return SelectedPuzzle(row=row, status="new")
 
     # 2) unsolved
-    async with conn.execute(
-        """
+    query_unsolved = f"""
         SELECT p.* FROM puzzles p
         JOIN user_puzzles up ON up.puzzle_id = p.id
         WHERE up.user_id = ? AND up.solved_at IS NULL
+        {ply_clause}
         ORDER BY RANDOM()
         LIMIT 1
-        """,
-        (user_id,),
-    ) as cur:
+    """
+    async with conn.execute(query_unsolved, tuple(params_unsolved)) as cur:
         row = await cur.fetchone()
         if row:
             return SelectedPuzzle(row=row, status="unsolved")
 
     # 3) everything solved: grab any random puzzle
-    async with conn.execute(
-        "SELECT p.* FROM puzzles p ORDER BY RANDOM() LIMIT 1"
-    ) as cur:
+    query_any = f"SELECT p.* FROM puzzles p WHERE 1=1 {ply_clause} ORDER BY RANDOM() LIMIT 1"
+    async with conn.execute(query_any, tuple(params_any)) as cur:
         row = await cur.fetchone()
         if row:
             return SelectedPuzzle(row=row, status="all_solved")

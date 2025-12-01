@@ -75,7 +75,16 @@ class PuzzleBot(discord.Client):
     # Slash commands -----------------------------------------------------
 
     @app_commands.command(name="puzzle", description="Send you a puzzle in DMs")
-    async def puzzle_command(self, interaction: discord.Interaction) -> None:
+    @app_commands.describe(
+        min_ply="Minimum ply (inclusive, optional). If set, puzzles without ply are excluded.",
+        max_ply="Maximum ply (inclusive, optional).",
+    )
+    async def puzzle_command(
+        self,
+        interaction: discord.Interaction,
+        min_ply: Optional[int] = None,
+        max_ply: Optional[int] = None,
+    ) -> None:
         assert self.db is not None
         user = interaction.user
 
@@ -91,7 +100,7 @@ class PuzzleBot(discord.Client):
             await interaction.followup.send("I can't DM you. Please allow DMs from server members.", ephemeral=True)
             return
 
-        selection = await select_puzzle_for_user(self.db, str(user.id))
+        selection = await select_puzzle_for_user(self.db, str(user.id), min_ply=min_ply, max_ply=max_ply)
         if not selection:
             await interaction.followup.send("No puzzles are available to send right now.", ephemeral=True)
             return
