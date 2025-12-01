@@ -212,14 +212,17 @@ class PuzzleBot(discord.Client):
         your_status: str,
     ) -> str:
         solution = row["solution"]
+        # Discord markdown eats single backslashes; double them for display.
+        solution_display = ";" + solution.replace("\\", "\\\\")
         ply = row["ply"]
         puzzle_id = row["id"]
         author = row["author"] or "unknown"
-        label = f"win in {ply}" if ply is not None else "Puzzle"
+        side = "White" if row["to_move"] else "Black"
+        label = f"{side} wins in {ply} (half) moves" if ply is not None else f"{side} to move"
         lines = [
             f"Puzzle {puzzle_id} authored by: {author}",
             f"{label}",
-            f"solution: ||{solution}||",
+            f"solution: ||{solution_display}||",
             f"global: {attempts} attempts / {solves} solves | votes: {likes} 👍 / {dislikes} 👎",
             f"your status: {your_status}",
             "React with ✅ when solved, 👍 to like, 👎 to dislike. Removing reactions clears your choice.",

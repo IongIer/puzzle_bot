@@ -25,6 +25,10 @@ To re-import/upsert after editing the file:
 ```
 uv run python -m puzzle_bot.import_puzzles
 ```
+Optional: set an author on import (default "Mzinga"):
+```
+uv run python -m puzzle_bot.import_puzzles --author "YourName"
+```
 
 ## Run the bot
 ```

@@ -12,6 +12,7 @@ class PuzzleRecord:
     solution: str
     ply: Optional[int]
     author: str = ""
+    to_move: bool = True
 
 
 async def open_db(path: str) -> aiosqlite.Connection:
@@ -32,6 +33,7 @@ async def ensure_schema(conn: aiosqlite.Connection) -> None:
             solution TEXT NOT NULL,
             ply INTEGER,
             author TEXT DEFAULT '',
+            to_move INTEGER DEFAULT 1,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
 
@@ -55,6 +57,8 @@ async def ensure_schema(conn: aiosqlite.Connection) -> None:
         columns = [row[1] for row in await cur.fetchall()]
         if "author" not in columns:
             await conn.execute("ALTER TABLE puzzles ADD COLUMN author TEXT DEFAULT ''")
+        if "to_move" not in columns:
+            await conn.execute("ALTER TABLE puzzles ADD COLUMN to_move INTEGER DEFAULT 1")
     await conn.commit()
 
 
@@ -76,40 +80,61 @@ def parse_csv_line(line: str, *, default_author: str = "") -> Optional[PuzzleRec
         return None
 
     variant = parts[0].strip()
-    move_segments = parts[3:]  # drop InProgress and color[count]
-    if not move_segments:
+    side_part = parts[2].strip().lower()
+    to_move = True if side_part.startswith("white") else False
+
+    remaining = parts[3:]
+    if not remaining:
         return None
 
-    last_segment = move_segments[-1].strip()
-    tokens = last_segment.split()
-    ply_index = None
-    for i in range(len(tokens) - 1, -1, -1):
-        if tokens[i].isdigit():
-            ply_index = i
+    move_segments: List[str] = []
+    solution_segments: List[str] = []
+    ply: Optional[int] = None
+
+    for idx, seg in enumerate(remaining):
+        seg_str = seg.strip()
+        tokens = seg_str.split()
+        if ply is None:
+            for j, tok in enumerate(tokens):
+                if tok.isdigit():
+                    try:
+                        ply = int(tok)
+                    except ValueError:
+                        return None
+                    before = " ".join(tokens[:j]).strip()
+                    if before:
+                        move_segments.append(before)
+                    after_tokens = tokens[j + 1 :]
+                    after_str = " ".join(after_tokens).strip()
+                    if after_str:
+                        solution_segments.append(after_str)
+                    solution_segments.extend(s.strip() for s in remaining[idx + 1 :])
+                    break
+            else:
+                move_segments.append(seg_str)
+        else:
+            solution_segments.append(seg_str)
+
+        if ply is not None and solution_segments:
             break
 
-    if ply_index is None or ply_index == len(tokens) - 1:
+    if ply is None:
         return None
 
-    try:
-        ply = int(tokens[ply_index])
-    except ValueError:
-        return None
-
-    solution_tokens = tokens[ply_index + 1 :]
-    solution = " ".join(solution_tokens).strip()
+    solution = ";".join(s for s in solution_segments if s != "")
     if not solution:
         return None
 
-    last_move_tokens = tokens[:ply_index]
-    last_move = " ".join(last_move_tokens).strip()
-    move_segments[-1] = last_move
+    uhp_segments = [variant] + [seg for seg in move_segments if seg != ""]
+    uhp = ";".join(uhp_segments)
 
-    # Rebuild uhp without the InProgress/side segment
-    uhp_segments = [variant] + move_segments
-    uhp = ";".join(seg for seg in uhp_segments if seg != "")
-
-    return PuzzleRecord(uhp=uhp, solution=solution, ply=ply, author=default_author or "Mzinga")
+    return PuzzleRecord(
+        uhp=uhp,
+        solution=solution,
+        ply=ply,
+        author=default_author or "Mzinga",
+        to_move=to_move,
+    )
 
 
 def load_puzzles_from_file(file_path: str, *, default_author: str = "") -> List[PuzzleRecord]:
@@ -133,12 +158,13 @@ async def upsert_puzzles(conn: aiosqlite.Connection, puzzles: Iterable[PuzzleRec
 
     await conn.executemany(
         """
-        INSERT INTO puzzles (uhp, solution, ply, author)
-        VALUES (:uhp, :solution, :ply, :author)
+        INSERT INTO puzzles (uhp, solution, ply, author, to_move)
+        VALUES (:uhp, :solution, :ply, :author, :to_move)
         ON CONFLICT(uhp) DO UPDATE SET
             solution=excluded.solution,
             ply=excluded.ply,
-            author=excluded.author
+            author=excluded.author,
+            to_move=excluded.to_move
         """,
         [row.__dict__ for row in rows],
     )
