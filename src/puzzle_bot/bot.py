@@ -148,7 +148,7 @@ class PuzzleBot(discord.Client):
         link_url = self._build_link(selection.row)
         link_content = f"[Puzzle {selection.row['id']}]({link_url})"
         if len(link_content) <= 2000:
-            await dm_channel.send(link_content)
+            await dm_channel.send(link_content, suppress_embeds=True)
         else:
             await dm_channel.send(
                 "Puzzle link is too long, sending it as a file to get around Discord's message limit. "
@@ -188,7 +188,11 @@ class PuzzleBot(discord.Client):
         link_url = self._build_solution_link(row)
         link_text = f"[Solution {puzzle_id}]({link_url})"
         if len(link_text) <= 2000:
-            await interaction.response.send_message(link_text, ephemeral=bool(interaction.guild))
+            await interaction.response.send_message(
+                link_text,
+                ephemeral=bool(interaction.guild),
+                suppress_embeds=True,
+            )
         else:
             note = (
                 "Solution link is too long, sending it as a file to get around Discord's message limit. "
@@ -313,7 +317,7 @@ class PuzzleBot(discord.Client):
                 link_url = self._build_solution_link(row)
                 link_text = f"[Solution {puzzle_id}]({link_url})"
                 if len(link_text) <= 2000:
-                    await interaction.response.send_message(link_text, ephemeral=True)
+                    await interaction.response.send_message(link_text, ephemeral=True, suppress_embeds=True)
                 else:
                     note = (
                         "Solution link is too long, sending it as a file to get around Discord's message limit. "
