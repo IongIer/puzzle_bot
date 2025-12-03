@@ -88,21 +88,22 @@ class PuzzleBot(discord.Client):
         assert self.db is not None
         user = interaction.user
 
-        # Acknowledge quickly
         if interaction.guild:
             await interaction.response.send_message("Check your DMs for a puzzle.", ephemeral=True)
-        else:
-            await interaction.response.defer(thinking=False)
-
-        try:
-            dm_channel = await user.create_dm()
-        except discord.Forbidden:
-            await interaction.followup.send("I can't DM you. Please allow DMs from server members.", ephemeral=True)
-            return
+            try:
+                dm_channel = await user.create_dm()
+            except discord.Forbidden:
+                await interaction.followup.send(
+                    "I can't DM you. Please allow DMs from server members.", ephemeral=True
+                )
+                return
 
         selection = await select_puzzle_for_user(self.db, str(user.id), min_ply=min_ply, max_ply=max_ply)
         if not selection:
-            await interaction.followup.send("No puzzles are available to send right now.", ephemeral=True)
+            if interaction.guild:
+                await interaction.followup.send("No puzzles are available to send right now.", ephemeral=True)
+            else:
+                await interaction.response.send_message("No puzzles are available to send right now.")
             return
 
         puzzle_id = selection.row["id"]
@@ -122,44 +123,51 @@ class PuzzleBot(discord.Client):
         elif selection.status == "all_solved":
             note_prefix = "You've solved everything! Here's a random one to revisit.\n\n"
 
-        message_body = self._format_puzzle(
+        message_body = note_prefix + self._format_puzzle(
             selection.row, likes, dislikes, attempts, solved, your_status
         )
-
-        # First message: info + reactions + button
-        button = discord.ui.Button(
-            style=discord.ButtonStyle.primary,
-            label="Show solved position",
-            custom_id=f"solve|{selection.row['id']}",
-        )
-        view = discord.ui.View()
-        view.add_item(button)
-
-        dm_message = await dm_channel.send(note_prefix + message_body, view=view)
-        for emoji in (CHECK_EMOJI, UPVOTE_EMOJI, DOWNVOTE_EMOJI):
-            try:
-                await dm_message.add_reaction(emoji)
-            except discord.HTTPException:
-                log.warning("Failed to add reaction %s", emoji)
-
-        await record_message_for_user(self.db, str(user.id), selection.row["id"], str(dm_message.id))
-
-        # Second message: link (attach as file only if too long)
+        view = self._build_puzzle_view(selection.row["id"])
         link_url = self._build_link(selection.row)
-        link_content = f"[Puzzle {selection.row['id']}]({link_url})"
-        if len(link_content) <= 2000:
-            await dm_channel.send(link_content, suppress_embeds=True)
-        else:
-            await dm_channel.send(
-                "Puzzle link is too long, sending it as a file to get around Discord's message limit. "
-                "Please copy it manually.",
-                file=discord.File(io.StringIO(link_url), filename="puzzle_link.txt"),
-            )
 
-        if not interaction.response.is_done():
-            await interaction.followup.send("Sent you a DM with a puzzle.", ephemeral=True)
-        elif interaction.guild:
-            await interaction.followup.send("Puzzle sent ✅", ephemeral=True)
+        if interaction.guild:
+            async def send_first(text: str, view: discord.ui.View) -> discord.Message:
+                return await dm_channel.send(text, view=view)
+
+            async def send_link(content: str, suppress_embeds: bool, file: Optional[discord.File] = None) -> None:
+                if file:
+                    await dm_channel.send(content, suppress_embeds=suppress_embeds, file=file)
+                else:
+                    await dm_channel.send(content, suppress_embeds=suppress_embeds)
+
+            await self._send_puzzle_messages(
+                message_body,
+                link_url,
+                puzzle_id,
+                str(user.id),
+                view,
+                send_first,
+                send_link,
+            )
+        else:
+            async def send_first(text: str, view: discord.ui.View) -> discord.Message:
+                await interaction.response.send_message(text, view=view)
+                return await interaction.original_response()
+
+            async def send_link(content: str, suppress_embeds: bool, file: Optional[discord.File] = None) -> None:
+                if file:
+                    await interaction.followup.send(content, suppress_embeds=suppress_embeds, file=file)
+                else:
+                    await interaction.followup.send(content, suppress_embeds=suppress_embeds)
+
+            await self._send_puzzle_messages(
+                message_body,
+                link_url,
+                puzzle_id,
+                str(user.id),
+                view,
+                send_first,
+                send_link,
+            )
 
     @app_commands.command(name="stats", description="Show your puzzle stats")
     async def stats_command(self, interaction: discord.Interaction) -> None:
@@ -287,6 +295,46 @@ class PuzzleBot(discord.Client):
         solution = row["solution"]
         combined = f"{uhp};{solution}"
         return f"{self.settings.base_url}?uhp={quote(combined, safe='')}"
+
+    def _build_puzzle_view(self, puzzle_id: int) -> discord.ui.View:
+        button = discord.ui.Button(
+            style=discord.ButtonStyle.primary,
+            label="Show solved position",
+            custom_id=f"solve|{puzzle_id}",
+        )
+        view = discord.ui.View()
+        view.add_item(button)
+        return view
+
+    async def _send_puzzle_messages(
+        self,
+        message_body: str,
+        link_url: str,
+        puzzle_id: int,
+        user_id: str,
+        view: discord.ui.View,
+        send_first_message,
+        send_link_message,
+    ) -> None:
+        message = await send_first_message(message_body, view)
+        for emoji in (CHECK_EMOJI, UPVOTE_EMOJI, DOWNVOTE_EMOJI):
+            try:
+                await message.add_reaction(emoji)
+            except discord.HTTPException:
+                log.warning("Failed to add reaction %s", emoji)
+
+        await record_message_for_user(self.db, user_id, puzzle_id, str(message.id))
+
+        link_content = f"[Puzzle {puzzle_id}]({link_url})"
+        if len(link_content) <= 2000:
+            await send_link_message(link_content, suppress_embeds=True)
+        else:
+            await send_link_message(
+                "Puzzle link is too long, sending it as a file to get around Discord's message limit. "
+                "Please copy it manually.",
+                suppress_embeds=False,
+                file=discord.File(io.StringIO(link_url), filename="puzzle_link.txt"),
+            )
 
     async def on_interaction(self, interaction: discord.Interaction) -> None:
         # Handle button interactions for solution
