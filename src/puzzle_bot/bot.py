@@ -44,7 +44,12 @@ class PuzzleBot(discord.Client):
         self.db: Optional[aiosqlite.Connection] = None
 
         # Register slash commands
-        for cmd in (self.puzzle_command, self.stats_command, self.solution_command):
+        for cmd in (
+            self.puzzle_command,
+            self.stats_command,
+            self.solution_command,
+            self.show_me_command,
+        ):
             cmd.binding = self
             self.tree.add_command(cmd)
 
@@ -74,7 +79,7 @@ class PuzzleBot(discord.Client):
 
     # Slash commands -----------------------------------------------------
 
-    @app_commands.command(name="puzzle", description="Send you a puzzle in DMs")
+    @app_commands.command(name="puzzle", description="Send you a random puzzle in DMs")
     @app_commands.describe(
         min_ply="Minimum ply (inclusive, optional). If set, puzzles without ply are excluded.",
         max_ply="Maximum ply (inclusive, optional).",
@@ -88,34 +93,13 @@ class PuzzleBot(discord.Client):
         assert self.db is not None
         user = interaction.user
 
-        if interaction.guild:
-            await interaction.response.send_message("Check your DMs for a puzzle.", ephemeral=True)
-            try:
-                dm_channel = await user.create_dm()
-            except discord.Forbidden:
-                await interaction.followup.send(
-                    "I can't DM you. Please allow DMs from server members.", ephemeral=True
-                )
-                return
-
         selection = await select_puzzle_for_user(self.db, str(user.id), min_ply=min_ply, max_ply=max_ply)
         if not selection:
-            if interaction.guild:
-                await interaction.followup.send("No puzzles are available to send right now.", ephemeral=True)
-            else:
-                await interaction.response.send_message("No puzzles are available to send right now.")
+            await interaction.response.send_message(
+                "No puzzles are available with that ply range right now.",
+                ephemeral=bool(interaction.guild),
+            )
             return
-
-        puzzle_id = selection.row["id"]
-        likes, dislikes = await vote_totals(self.db, puzzle_id)
-        attempts, solved = await puzzle_totals(self.db, puzzle_id)
-        prior_state = await user_puzzle_state(self.db, str(user.id), puzzle_id)
-        if prior_state and prior_state["solved_at"]:
-            your_status = "You already solved this one."
-        elif prior_state:
-            your_status = "You attempted this one before but haven't solved it yet."
-        else:
-            your_status = "You haven't tried this one yet."
 
         note_prefix = ""
         if selection.status == "unsolved":
@@ -123,51 +107,7 @@ class PuzzleBot(discord.Client):
         elif selection.status == "all_solved":
             note_prefix = "You've solved everything! Here's a random one to revisit.\n\n"
 
-        message_body = note_prefix + self._format_puzzle(
-            selection.row, likes, dislikes, attempts, solved, your_status
-        )
-        view = self._build_puzzle_view(selection.row["id"])
-        link_url = self._build_link(selection.row)
-
-        if interaction.guild:
-            async def send_first(text: str, view: discord.ui.View) -> discord.Message:
-                return await dm_channel.send(text, view=view)
-
-            async def send_link(content: str, suppress_embeds: bool, file: Optional[discord.File] = None) -> None:
-                if file:
-                    await dm_channel.send(content, suppress_embeds=suppress_embeds, file=file)
-                else:
-                    await dm_channel.send(content, suppress_embeds=suppress_embeds)
-
-            await self._send_puzzle_messages(
-                message_body,
-                link_url,
-                puzzle_id,
-                str(user.id),
-                view,
-                send_first,
-                send_link,
-            )
-        else:
-            async def send_first(text: str, view: discord.ui.View) -> discord.Message:
-                await interaction.response.send_message(text, view=view)
-                return await interaction.original_response()
-
-            async def send_link(content: str, suppress_embeds: bool, file: Optional[discord.File] = None) -> None:
-                if file:
-                    await interaction.followup.send(content, suppress_embeds=suppress_embeds, file=file)
-                else:
-                    await interaction.followup.send(content, suppress_embeds=suppress_embeds)
-
-            await self._send_puzzle_messages(
-                message_body,
-                link_url,
-                puzzle_id,
-                str(user.id),
-                view,
-                send_first,
-                send_link,
-            )
+        await self._deliver_puzzle(interaction, selection.row, note_prefix=note_prefix)
 
     @app_commands.command(name="stats", description="Show your puzzle stats")
     async def stats_command(self, interaction: discord.Interaction) -> None:
@@ -189,7 +129,7 @@ class PuzzleBot(discord.Client):
             row = await cur.fetchone()
         if not row:
             await interaction.response.send_message(
-                f"Puzzle {puzzle_id} not found.", ephemeral=bool(interaction.guild)
+                f"Solution {puzzle_id} not found.", ephemeral=bool(interaction.guild)
             )
             return
 
@@ -211,6 +151,20 @@ class PuzzleBot(discord.Client):
                 ephemeral=bool(interaction.guild),
                 file=discord.File(io.StringIO(link_url), filename="solution_link.txt"),
             )
+
+    @app_commands.command(name="show_me", description="Send you a specific puzzle in DMs")
+    @app_commands.describe(puzzle_id="Puzzle id to fetch")
+    async def show_me_command(self, interaction: discord.Interaction, puzzle_id: int) -> None:
+        assert self.db is not None
+        async with self.db.execute("SELECT * FROM puzzles WHERE id = ?", (puzzle_id,)) as cur:
+            row = await cur.fetchone()
+        if not row:
+            await interaction.response.send_message(
+                f"Puzzle {puzzle_id} not found.", ephemeral=bool(interaction.guild)
+            )
+            return
+
+        await self._deliver_puzzle(interaction, row)
 
     # Reaction handling --------------------------------------------------
 
@@ -306,6 +260,85 @@ class PuzzleBot(discord.Client):
         view.add_item(button)
         return view
 
+    async def _deliver_puzzle(
+        self,
+        interaction: discord.Interaction,
+        puzzle_row: discord.utils.SequenceProxy,
+        note_prefix: str = "",
+    ) -> None:
+        assert self.db is not None
+        user_id = str(interaction.user.id)
+        puzzle_id = puzzle_row["id"]
+
+        likes, dislikes = await vote_totals(self.db, puzzle_id)
+        attempts, solved = await puzzle_totals(self.db, puzzle_id)
+        prior_state = await user_puzzle_state(self.db, user_id, puzzle_id)
+        if prior_state and prior_state["solved_at"]:
+            your_status = "You already solved this one."
+        elif prior_state:
+            your_status = "You attempted this one before but haven't solved it yet."
+        else:
+            your_status = "You haven't tried this one yet."
+
+        message_body = note_prefix + self._format_puzzle(
+            puzzle_row, likes, dislikes, attempts, solved, your_status
+        )
+        view = self._build_puzzle_view(puzzle_id)
+        link_url = self._build_link(puzzle_row)
+
+        senders = await self._build_message_senders(interaction)
+        if not senders:
+            return
+        send_first, send_link = senders
+
+        await self._send_puzzle_messages(
+            message_body,
+            link_url,
+            puzzle_id,
+            user_id,
+            view,
+            send_first,
+            send_link,
+        )
+
+    async def _build_message_senders(
+        self, interaction: discord.Interaction
+    ) -> Optional[tuple]:
+        user = interaction.user
+
+        if interaction.guild:
+            await interaction.response.send_message("Check your DMs for a puzzle.", ephemeral=True)
+            try:
+                dm_channel = await user.create_dm()
+            except discord.Forbidden:
+                await interaction.followup.send(
+                    "I can't DM you. Please allow DMs from server members.", ephemeral=True
+                )
+                return None
+
+            async def send_first(text: str, view: discord.ui.View) -> discord.Message:
+                return await dm_channel.send(text, view=view)
+
+            async def send_link(content: str, suppress_embeds: bool, file: Optional[discord.File] = None) -> None:
+                if file:
+                    await dm_channel.send(content, suppress_embeds=suppress_embeds, file=file)
+                else:
+                    await dm_channel.send(content, suppress_embeds=suppress_embeds)
+
+            return send_first, send_link
+
+        async def send_first(text: str, view: discord.ui.View) -> discord.Message:
+            await interaction.response.send_message(text, view=view)
+            return await interaction.original_response()
+
+        async def send_link(content: str, suppress_embeds: bool, file: Optional[discord.File] = None) -> None:
+            if file:
+                await interaction.followup.send(content, suppress_embeds=suppress_embeds, file=file)
+            else:
+                await interaction.followup.send(content, suppress_embeds=suppress_embeds)
+
+        return send_first, send_link
+
     async def _send_puzzle_messages(
         self,
         message_body: str,
@@ -358,7 +391,7 @@ class PuzzleBot(discord.Client):
                     row = await cur.fetchone()
                 if not row:
                     await interaction.response.send_message(
-                        f"Puzzle {puzzle_id} not found.", ephemeral=True
+                        f"Solution {puzzle_id} not found.", ephemeral=True
                     )
                     return
 
