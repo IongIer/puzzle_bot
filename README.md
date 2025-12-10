@@ -36,8 +36,10 @@ uv run python -m puzzle_bot
 ```
 
 Commands:
-- `/show_puzzle` (DMs you a puzzle; optional `min_ply`/`max_ply`; reactions ✅/👍/👎 track solved/like/dislike; removing reactions clears your choice)
+- `/puzzle` (DMs you a random puzzle; optional `min_ply`/`max_ply`; reactions ✅/👍/👎 track solved/like/dislike; removing reactions clears your choice)
+- `/show_me <id>` (DMs you a specific puzzle by id)
 - `/stats` (your totals: attempted/solved/unseen/likes/dislikes)
 - `/solution <id>` (returns the solution link for a specific puzzle id; uses a file if the link is too long)
+- `/post <id>` (guild-only; posts the puzzle to the current channel with global stats; solution button DMs the solver; per-user solved/like/dislike tracked via reactions; 1 puzzle/min per user cooldown)
 
-Each puzzle DM shows the link (built from `PUZZLE_BASE_URL` + `uhp`), the spoilered solution, global attempts/solves, global likes/dislikes, and your personal status on that puzzle.
+Each puzzle DM shows the link (built from `PUZZLE_BASE_URL` + `uhp`), the spoilered solution, global attempts/solves, global likes/dislikes, and your personal status on that puzzle. Channel posts show the same info minus personal status and record attempts/solves/likes for anyone who reacts.

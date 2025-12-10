@@ -212,3 +212,38 @@ async def user_stats(conn: aiosqlite.Connection, user_id: str) -> dict:
         "unseen": unseen,
         "unsolved": unsolved,
     }
+
+
+async def record_message_mapping(
+    conn: aiosqlite.Connection,
+    puzzle_id: int,
+    message_id: str,
+    *,
+    channel_id: Optional[str] = None,
+    posted_by: Optional[str] = None,
+) -> None:
+    await conn.execute(
+        """
+        INSERT INTO message_puzzles (message_id, puzzle_id, channel_id, posted_by)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(message_id) DO UPDATE SET
+            puzzle_id = excluded.puzzle_id,
+            channel_id = excluded.channel_id,
+            posted_by = excluded.posted_by
+        """,
+        (message_id, puzzle_id, channel_id, posted_by),
+    )
+    await conn.commit()
+
+
+async def puzzle_for_message(conn: aiosqlite.Connection, message_id: str) -> Optional[aiosqlite.Row]:
+    async with conn.execute(
+        """
+        SELECT p.* FROM message_puzzles mp
+        JOIN puzzles p ON p.id = mp.puzzle_id
+        WHERE mp.message_id = ?
+        LIMIT 1
+        """,
+        (message_id,),
+    ) as cur:
+        return await cur.fetchone()

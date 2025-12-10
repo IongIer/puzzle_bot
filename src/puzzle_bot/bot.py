@@ -1,6 +1,8 @@
 import io
 import logging
-from typing import Optional
+import math
+import time
+from typing import Optional, Tuple
 from urllib.parse import quote
 
 import aiosqlite
@@ -13,6 +15,8 @@ from .service import (
     lookup_puzzle_by_message,
     puzzle_totals,
     record_message_for_user,
+    record_message_mapping,
+    puzzle_for_message,
     select_puzzle_for_user,
     update_like,
     update_solved,
@@ -42,6 +46,7 @@ class PuzzleBot(discord.Client):
         self.settings = settings
         self.tree = app_commands.CommandTree(self)
         self.db: Optional[aiosqlite.Connection] = None
+        self._post_cooldowns: dict[str, float] = {}
 
         # Register slash commands
         for cmd in (
@@ -49,6 +54,7 @@ class PuzzleBot(discord.Client):
             self.stats_command,
             self.solution_command,
             self.show_me_command,
+            self.post_command,
         ):
             cmd.binding = self
             self.tree.add_command(cmd)
@@ -166,6 +172,90 @@ class PuzzleBot(discord.Client):
 
         await self._deliver_puzzle(interaction, row)
 
+    @app_commands.command(name="post", description="Post a puzzle to this channel")
+    @app_commands.describe(puzzle_id="Puzzle id to post")
+    async def post_command(self, interaction: discord.Interaction, puzzle_id: int) -> None:
+        assert self.db is not None
+        if not interaction.guild:
+            await interaction.response.send_message(
+                "This command can only be used in servers.", ephemeral=True
+            )
+            return
+
+        now = time.monotonic()
+        self._trim_post_cooldowns(now)
+        user_id_str = str(interaction.user.id)
+        last_post = self._post_cooldowns.get(user_id_str)
+        if last_post and now - last_post < 60:
+            wait_seconds = math.ceil(60 - (now - last_post))
+            await interaction.response.send_message(
+                f"You're posting puzzles too quickly. Try again in {wait_seconds} seconds.",
+                ephemeral=True,
+            )
+            return
+
+        async with self.db.execute("SELECT * FROM puzzles WHERE id = ?", (puzzle_id,)) as cur:
+            row = await cur.fetchone()
+        if not row:
+            await interaction.response.send_message(
+                f"Puzzle {puzzle_id} not found.", ephemeral=True
+            )
+            return
+
+        channel = interaction.channel
+        if not channel or not hasattr(channel, "send"):
+            await interaction.response.send_message(
+                "I can't post puzzles in this channel.", ephemeral=True
+            )
+            return
+
+        likes, dislikes = await vote_totals(self.db, puzzle_id)
+        attempts, solved = await puzzle_totals(self.db, puzzle_id)
+
+        message_body = self._format_puzzle(row, likes, dislikes, attempts, solved, your_status=None)
+        view = self._build_puzzle_view(puzzle_id)
+        link_url = self._build_link(row)
+
+        await interaction.response.defer(ephemeral=True)
+        senders = await self._build_channel_senders(interaction)
+        if not senders:
+            await interaction.followup.send("I can't post puzzles in this channel.", ephemeral=True)
+            return
+        send_first, send_link = senders
+
+        try:
+            message = await self._send_puzzle_messages(
+                message_body,
+                link_url,
+                puzzle_id,
+                user_id_str,
+                view,
+                send_first,
+                send_link,
+            )
+        except discord.Forbidden:
+            await interaction.followup.send("I can't post puzzles in this channel.", ephemeral=True)
+            return
+        except discord.HTTPException:
+            await interaction.followup.send("Failed to post the puzzle. Please try again.", ephemeral=True)
+            return
+
+        await record_message_mapping(
+            self.db,
+            puzzle_id,
+            str(message.id),
+            channel_id=str(getattr(channel, "id", "")),
+            posted_by=user_id_str,
+        )
+        self._post_cooldowns[user_id_str] = time.monotonic()
+        await interaction.followup.send(f"Posted puzzle {puzzle_id} to this channel.", ephemeral=True)
+
+    def _trim_post_cooldowns(self, now: float, *, max_age: float = 3600) -> None:
+        # Drop stale entries so the cooldown cache doesn't grow unbounded.
+        expired = [uid for uid, ts in self._post_cooldowns.items() if now - ts > max_age]
+        for uid in expired:
+            self._post_cooldowns.pop(uid, None)
+
     # Reaction handling --------------------------------------------------
 
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent) -> None:
@@ -174,7 +264,7 @@ class PuzzleBot(discord.Client):
         if not self.db:
             return
 
-        puzzle_row = await lookup_puzzle_by_message(self.db, str(payload.user_id), payload.message_id)
+        puzzle_row = await self._resolve_puzzle_for_reaction(payload)
         if not puzzle_row:
             return
 
@@ -196,7 +286,7 @@ class PuzzleBot(discord.Client):
         if not self.db:
             return
 
-        puzzle_row = await lookup_puzzle_by_message(self.db, str(payload.user_id), payload.message_id)
+        puzzle_row = await self._resolve_puzzle_for_reaction(payload)
         if not puzzle_row:
             return
 
@@ -212,6 +302,19 @@ class PuzzleBot(discord.Client):
 
     # Helpers ------------------------------------------------------------
 
+    async def _resolve_puzzle_for_reaction(
+        self, payload: discord.RawReactionActionEvent
+    ) -> Optional[discord.utils.SequenceProxy]:
+        user_id = str(payload.user_id)
+        puzzle_row = await lookup_puzzle_by_message(self.db, user_id, payload.message_id)
+        if puzzle_row:
+            return puzzle_row
+
+        fallback = await puzzle_for_message(self.db, str(payload.message_id))
+        if fallback:
+            await record_message_for_user(self.db, user_id, fallback["id"], str(payload.message_id))
+        return fallback
+
     def _format_puzzle(
         self,
         row: discord.utils.SequenceProxy,
@@ -219,7 +322,7 @@ class PuzzleBot(discord.Client):
         dislikes: int,
         attempts: int,
         solves: int,
-        your_status: str,
+        your_status: Optional[str],
     ) -> str:
         solution = row["solution"]
         # Discord markdown eats single backslashes; double them for display.
@@ -234,10 +337,11 @@ class PuzzleBot(discord.Client):
             f"{label}",
             f"solution: ||{solution_display}||",
             f"global: {attempts} attempts / {solves} solves | votes: {likes} 👍 / {dislikes} 👎",
-            f"your status: {your_status}",
             "React with ✅ when solved, 👍 to like, 👎 to dislike. Removing reactions clears your choice.",
             "The solution link opens the final position after applying the solution; use the move list to rewind.",
         ]
+        if your_status:
+            lines.insert(4, f"your status: {your_status}")
         return "\n".join(lines)
 
     def _build_link(self, row: discord.utils.SequenceProxy) -> str:
@@ -303,7 +407,7 @@ class PuzzleBot(discord.Client):
 
     async def _build_message_senders(
         self, interaction: discord.Interaction
-    ) -> Optional[tuple]:
+    ) -> Optional[Tuple]:
         user = interaction.user
 
         if interaction.guild:
@@ -339,6 +443,24 @@ class PuzzleBot(discord.Client):
 
         return send_first, send_link
 
+    async def _build_channel_senders(
+        self, interaction: discord.Interaction
+    ) -> Optional[Tuple]:
+        channel = interaction.channel
+        if not channel or not hasattr(channel, "send"):
+            return None
+
+        async def send_first(text: str, view: discord.ui.View) -> discord.Message:
+            return await channel.send(text, view=view)
+
+        async def send_link(content: str, suppress_embeds: bool, file: Optional[discord.File] = None) -> None:
+            if file:
+                await channel.send(content, suppress_embeds=suppress_embeds, file=file)
+            else:
+                await channel.send(content, suppress_embeds=suppress_embeds)
+
+        return send_first, send_link
+
     async def _send_puzzle_messages(
         self,
         message_body: str,
@@ -348,7 +470,7 @@ class PuzzleBot(discord.Client):
         view: discord.ui.View,
         send_first_message,
         send_link_message,
-    ) -> None:
+    ) -> discord.Message:
         message = await send_first_message(message_body, view)
         for emoji in (CHECK_EMOJI, UPVOTE_EMOJI, DOWNVOTE_EMOJI):
             try:
@@ -368,6 +490,7 @@ class PuzzleBot(discord.Client):
                 suppress_embeds=False,
                 file=discord.File(io.StringIO(link_url), filename="puzzle_link.txt"),
             )
+        return message
 
     async def on_interaction(self, interaction: discord.Interaction) -> None:
         # Handle button interactions for solution

@@ -50,6 +50,17 @@ async def ensure_schema(conn: aiosqlite.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_user_message ON user_puzzles(message_id);
         CREATE INDEX IF NOT EXISTS idx_user_solved ON user_puzzles(user_id, solved_at);
+
+        CREATE TABLE IF NOT EXISTS message_puzzles (
+            message_id TEXT PRIMARY KEY,
+            puzzle_id INTEGER NOT NULL,
+            channel_id TEXT,
+            posted_by TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (puzzle_id) REFERENCES puzzles(id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_message_puzzle ON message_puzzles(puzzle_id);
         """
     )
     # Add author column if migrating an existing DB
