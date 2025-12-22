@@ -10,7 +10,7 @@ import discord
 from discord import app_commands
 
 from .config import Settings
-from .db import open_db, seed_if_empty
+from .db import PuzzleRecord, open_db, parse_csv_line_detailed, seed_if_empty, upsert_puzzles
 from .service import (
     delete_puzzle,
     lookup_puzzle_by_message,
@@ -73,6 +73,9 @@ class PuzzleBot(discord.Client):
             delete_cmd = self.delete_command
             delete_cmd.binding = self
             self.tree.add_command(delete_cmd, guild=guild_obj)
+            add_cmd = self.add_command
+            add_cmd.binding = self
+            self.tree.add_command(add_cmd, guild=guild_obj)
             synced = await self.tree.sync(guild=guild_obj)
             log.info("Synced %s commands to guild %s", len(synced), self.settings.guild_id)
 
@@ -292,6 +295,146 @@ class PuzzleBot(discord.Client):
                 f"Removed {deleted['user_puzzles']} user records and {deleted['message_puzzles']} message records."
             ),
             ephemeral=True,
+        )
+
+    @app_commands.command(name="add", description="Upsert puzzles from a CSV attachment (admin-only)")
+    @app_commands.describe(
+        author="Author name applied to imported puzzles",
+        csv="CSV file with puzzles (max 15 non-empty lines)",
+    )
+    @app_commands.guild_only()
+    @app_commands.default_permissions(manage_guild=True)
+    async def add_command(
+        self,
+        interaction: discord.Interaction,
+        author: str,
+        csv: discord.Attachment,
+    ) -> None:
+        assert self.db is not None
+        if not interaction.guild:
+            await interaction.response.send_message(
+                "This command can only be used in servers.", ephemeral=True
+            )
+            return
+
+        permissions = getattr(interaction.user, "guild_permissions", None)
+        if not permissions or not permissions.manage_guild:
+            await interaction.response.send_message(
+                "You don't have permission to use this command.", ephemeral=True
+            )
+            return
+
+        filename = (csv.filename or "").lower()
+        if not filename.endswith(".csv"):
+            await interaction.response.send_message(
+                "Please upload a `.csv` file.", ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        try:
+            raw_bytes = await csv.read()
+        except discord.HTTPException:
+            await interaction.followup.send(
+                "Failed to download the attachment from Discord. Please try again.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            text = raw_bytes.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            await interaction.followup.send(
+                "Failed to decode the CSV as UTF-8. Please re-save it as UTF-8 and try again.",
+                ephemeral=True,
+            )
+            return
+
+        all_lines = text.splitlines()
+        non_empty = [(idx, line) for idx, line in enumerate(all_lines, start=1) if line.strip()]
+        if len(non_empty) > 15:
+            await interaction.followup.send(
+                f"CSV must contain no more than 15 non-empty lines (puzzles). Found {len(non_empty)}.",
+                ephemeral=True,
+            )
+            return
+
+        parsed: list[tuple[int, PuzzleRecord]] = []
+        failures: list[tuple[int, str]] = []
+        for line_num, line in non_empty:
+            record, reason = parse_csv_line_detailed(line, default_author=author)
+            if record:
+                parsed.append((line_num, record))
+            else:
+                failures.append((line_num, reason or "moves"))
+
+        if not parsed:
+            details = ", ".join(f"line {ln}: {reason}" for ln, reason in failures) or "no valid puzzle lines found"
+            await interaction.followup.send(
+                f"No puzzles were imported; {details}.",
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+
+        deduped: dict[str, tuple[int, PuzzleRecord]] = {}
+        duplicate_lines: list[int] = []
+        for line_num, record in parsed:
+            if record.uhp in deduped:
+                duplicate_lines.append(line_num)
+                continue
+            deduped[record.uhp] = (line_num, record)
+
+        existing_uhp: set[str] = set()
+        if deduped:
+            placeholders = ", ".join("?" for _ in deduped)
+            async with self.db.execute(
+                f"SELECT uhp FROM puzzles WHERE uhp IN ({placeholders})",
+                tuple(deduped.keys()),
+            ) as cur:
+                existing_uhp = {row[0] for row in await cur.fetchall()}
+
+        new_records = [record for uhp, (_, record) in deduped.items() if uhp not in existing_uhp]
+        skipped_existing = len(deduped) - len(new_records)
+
+        try:
+            imported = await upsert_puzzles(self.db, new_records)
+        except Exception:
+            log.exception("Failed to import puzzles from attachment")
+            await interaction.followup.send(
+                "Failed to import puzzles due to a database error.",
+                ephemeral=True,
+            )
+            return
+
+        inserted_ids: list[int] = []
+        if new_records:
+            placeholders = ", ".join("?" for _ in new_records)
+            async with self.db.execute(
+                f"SELECT id, uhp FROM puzzles WHERE uhp IN ({placeholders})",
+                tuple(record.uhp for record in new_records),
+            ) as cur:
+                rows = await cur.fetchall()
+            id_by_uhp = {row["uhp"]: row["id"] for row in rows}
+            inserted_ids = [id_by_uhp[record.uhp] for record in new_records if record.uhp in id_by_uhp]
+
+        if imported:
+            message_lines = [f"Imported {imported} new puzzle(s)."]
+            if inserted_ids:
+                message_lines.append(f"ids: {', '.join(str(pid) for pid in inserted_ids)}")
+        else:
+            message_lines = ["No new puzzles were imported."]
+        if skipped_existing:
+            message_lines.append(f"Skipped {skipped_existing} existing puzzle(s).")
+        if duplicate_lines:
+            message_lines.append(f"Skipped {len(duplicate_lines)} duplicate line(s) in the upload.")
+        if failures:
+            message_lines.append(f"Failed to parse {len(failures)} line(s):")
+            message_lines.extend(f"- line {ln}: {reason}" for ln, reason in failures)
+        await interaction.followup.send(
+            "\n".join(message_lines),
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
         )
 
     def _trim_post_cooldowns(self, now: float, *, max_age: float = 3600) -> None:

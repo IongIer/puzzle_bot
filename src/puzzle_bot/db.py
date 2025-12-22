@@ -74,9 +74,17 @@ async def ensure_schema(conn: aiosqlite.Connection) -> None:
 
 
 def parse_csv_line(line: str, *, default_author: str = "") -> Optional[PuzzleRecord]:
+    record, _reason = parse_csv_line_detailed(line, default_author=default_author)
+    return record
+
+
+def parse_csv_line_detailed(
+    line: str, *, default_author: str = ""
+) -> tuple[Optional[PuzzleRecord], Optional[str]]:
     """
-    Parse one line from MzingaTrainer_0.13.0_Puzzles.csv:
+    Parse one line from MzingaTrainer_0.13.0_Puzzles.csv (or a raw UHP line):
     <variant>;InProgress;White[NN];<move>;...;<last_move_and_ply_and_solution>
+    <variant>;<move>;...;<last_move_and_ply_and_solution>
     Extracts:
       - uhp: <variant>;move;move;...;last_move   (drops InProgress;White/Black[..])
       - ply: integer token immediately before the solution
@@ -84,19 +92,32 @@ def parse_csv_line(line: str, *, default_author: str = "") -> Optional[PuzzleRec
     """
     line = line.strip()
     if not line:
-        return None
+        return None, "moves"
 
     parts = line.split(";")
-    if len(parts) < 4:
-        return None
+    if len(parts) < 2:
+        return None, "moves"
 
     variant = parts[0].strip()
-    side_part = parts[2].strip().lower()
-    to_move = True if side_part.startswith("white") else False
+    to_move = True
+    start_idx = 1
+    has_header = False
+    if len(parts) >= 3:
+        maybe_inprogress = parts[1].strip().lower()
+        maybe_side = parts[2].strip().lower()
+        if maybe_inprogress == "inprogress" and (
+            maybe_side.startswith("white") or maybe_side.startswith("black")
+        ):
+            has_header = True
+            to_move = maybe_side.startswith("white")
+            start_idx = 3
 
-    remaining = parts[3:]
+    if len(parts) <= start_idx:
+        return None, "moves"
+
+    remaining = parts[start_idx:]
     if not remaining:
-        return None
+        return None, "moves"
 
     move_segments: List[str] = []
     solution_segments: List[str] = []
@@ -111,7 +132,7 @@ def parse_csv_line(line: str, *, default_author: str = "") -> Optional[PuzzleRec
                     try:
                         ply = int(tok)
                     except ValueError:
-                        return None
+                        return None, "ply"
                     before = " ".join(tokens[:j]).strip()
                     if before:
                         move_segments.append(before)
@@ -130,21 +151,28 @@ def parse_csv_line(line: str, *, default_author: str = "") -> Optional[PuzzleRec
             break
 
     if ply is None:
-        return None
+        return None, "ply"
 
     solution = ";".join(s for s in solution_segments if s != "")
     if not solution:
-        return None
+        return None, "solution"
 
     uhp_segments = [variant] + [seg for seg in move_segments if seg != ""]
     uhp = ";".join(uhp_segments)
 
-    return PuzzleRecord(
-        uhp=uhp,
-        solution=solution,
-        ply=ply,
-        author=default_author or "Mzinga",
-        to_move=to_move,
+    if not has_header:
+        # White always starts; parity of move count determines whose turn it is.
+        to_move = len(move_segments) % 2 == 0
+
+    return (
+        PuzzleRecord(
+            uhp=uhp,
+            solution=solution,
+            ply=ply,
+            author=default_author or "Mzinga",
+            to_move=to_move,
+        ),
+        None,
     )
 
 
@@ -167,20 +195,21 @@ async def upsert_puzzles(conn: aiosqlite.Connection, puzzles: Iterable[PuzzleRec
     if not rows:
         return 0
 
+    async with conn.execute("SELECT COUNT(*) FROM puzzles") as cur:
+        before_count = (await cur.fetchone())[0] or 0
+
     await conn.executemany(
         """
         INSERT INTO puzzles (uhp, solution, ply, author, to_move)
         VALUES (:uhp, :solution, :ply, :author, :to_move)
-        ON CONFLICT(uhp) DO UPDATE SET
-            solution=excluded.solution,
-            ply=excluded.ply,
-            author=excluded.author,
-            to_move=excluded.to_move
+        ON CONFLICT(uhp) DO NOTHING
         """,
         [row.__dict__ for row in rows],
     )
     await conn.commit()
-    return len(rows)
+    async with conn.execute("SELECT COUNT(*) FROM puzzles") as cur:
+        after_count = (await cur.fetchone())[0] or 0
+    return max(after_count - before_count, 0)
 
 
 async def seed_if_empty(conn: aiosqlite.Connection, puzzle_file: str, *, default_author: str = "") -> int:

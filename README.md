@@ -9,7 +9,7 @@ Discord puzzle bot with SQLite state and slash commands.
   - `PUZZLE_DB_PATH` (default `puzzle_bot.db`)
   - `PUZZLE_FILE` (default `MzingaTrainer_0.13.0_Puzzles.csv`)
   - `PUZZLE_BASE_URL` (default `http://127.0.0.1:3000/analysis`)
-  - `DISCORD_GUILD_ID` (optional: if set, commands are also force-synced to that guild for instant updates; required for `/delete`)
+  - `DISCORD_GUILD_ID` (optional: if set, commands are also force-synced to that guild for instant updates; required for `/delete` and `/add`)
 
 ## Install deps
 ```
@@ -21,7 +21,7 @@ Loads from the CSV file into SQLite (does nothing if already populated):
 ```
 uv run python -m puzzle_bot.import_puzzles --only-if-empty
 ```
-To re-import/upsert after editing the file:
+To import new puzzles after editing the file (duplicates ignored):
 ```
 uv run python -m puzzle_bot.import_puzzles
 ```
@@ -42,5 +42,6 @@ Commands:
 - `/solution <id>` (returns the solution link for a specific puzzle id; uses a file if the link is too long)
 - `/post <id>` (guild-only; posts the puzzle to the current channel with global stats; solution button DMs the solver; per-user solved/like/dislike tracked via reactions; 1 puzzle/min per user cooldown)
 - `/delete <id>` (admin-only; deletes a puzzle from the DB; registered only to the `DISCORD_GUILD_ID` guild)
+- `/add <author> <csv>` (admin-only; upserts puzzles from an uploaded `.csv` attachment; max 15 non-empty lines; registered only to the `DISCORD_GUILD_ID` guild)
 
 Each puzzle DM shows the link (built from `PUZZLE_BASE_URL` + `uhp`), the spoilered solution, global attempts/solves, global likes/dislikes, and your personal status on that puzzle. Channel posts show the same info minus personal status and record attempts/solves/likes for anyone who reacts.

@@ -28,7 +28,7 @@ async def main() -> None:
         else:
             loaded = load_puzzles_from_file(str(puzzles_file), default_author=args.author)
             added = await upsert_puzzles(conn, loaded)
-        print(f"Imported or updated {added} puzzles with author '{args.author}'.")
+        print(f"Imported {added} new puzzles with author '{args.author}'.")
     finally:
         await conn.close()
 
