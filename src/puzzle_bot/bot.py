@@ -12,6 +12,7 @@ from discord import app_commands
 from .config import Settings
 from .db import open_db, seed_if_empty
 from .service import (
+    delete_puzzle,
     lookup_puzzle_by_message,
     puzzle_totals,
     record_message_for_user,
@@ -69,6 +70,9 @@ class PuzzleBot(discord.Client):
         if self.settings.guild_id:
             guild_obj = discord.Object(id=self.settings.guild_id)
             self.tree.copy_global_to(guild=guild_obj)
+            delete_cmd = self.delete_command
+            delete_cmd.binding = self
+            self.tree.add_command(delete_cmd, guild=guild_obj)
             synced = await self.tree.sync(guild=guild_obj)
             log.info("Synced %s commands to guild %s", len(synced), self.settings.guild_id)
 
@@ -249,6 +253,46 @@ class PuzzleBot(discord.Client):
         )
         self._post_cooldowns[user_id_str] = time.monotonic()
         await interaction.followup.send(f"Posted puzzle {puzzle_id} to this channel.", ephemeral=True)
+
+    @app_commands.command(name="delete", description="Delete a puzzle by id (admin-only)")
+    @app_commands.describe(puzzle_id="Puzzle id to delete")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(manage_guild=True)
+    async def delete_command(self, interaction: discord.Interaction, puzzle_id: int) -> None:
+        assert self.db is not None
+        if not interaction.guild:
+            await interaction.response.send_message(
+                "This command can only be used in servers.", ephemeral=True
+            )
+            return
+
+        permissions = getattr(interaction.user, "guild_permissions", None)
+        if not permissions or not permissions.manage_guild:
+            await interaction.response.send_message(
+                "You don't have permission to use this command.", ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        try:
+            deleted = await delete_puzzle(self.db, puzzle_id)
+        except Exception:
+            log.exception("Failed to delete puzzle %s", puzzle_id)
+            await interaction.followup.send(
+                "Failed to delete the puzzle due to a database error.", ephemeral=True
+            )
+            return
+        if not deleted:
+            await interaction.followup.send(f"Puzzle {puzzle_id} not found.", ephemeral=True)
+            return
+
+        await interaction.followup.send(
+            (
+                f"Deleted puzzle {puzzle_id}. "
+                f"Removed {deleted['user_puzzles']} user records and {deleted['message_puzzles']} message records."
+            ),
+            ephemeral=True,
+        )
 
     def _trim_post_cooldowns(self, now: float, *, max_age: float = 3600) -> None:
         # Drop stale entries so the cooldown cache doesn't grow unbounded.

@@ -247,3 +247,41 @@ async def puzzle_for_message(conn: aiosqlite.Connection, message_id: str) -> Opt
         (message_id,),
     ) as cur:
         return await cur.fetchone()
+
+
+async def delete_puzzle(conn: aiosqlite.Connection, puzzle_id: int) -> Optional[dict[str, int]]:
+    async with conn.execute("SELECT 1 FROM puzzles WHERE id = ?", (puzzle_id,)) as cur:
+        exists = await cur.fetchone()
+        if not exists:
+            return None
+
+    async with conn.execute(
+        "SELECT COUNT(*) FROM user_puzzles WHERE puzzle_id = ?",
+        (puzzle_id,),
+    ) as cur:
+        user_puzzles = (await cur.fetchone())[0] or 0
+
+    async with conn.execute(
+        "SELECT COUNT(*) FROM message_puzzles WHERE puzzle_id = ?",
+        (puzzle_id,),
+    ) as cur:
+        message_puzzles = (await cur.fetchone())[0] or 0
+
+    try:
+        await conn.executescript(
+            f"""
+            BEGIN;
+            DELETE FROM user_puzzles WHERE puzzle_id = {puzzle_id};
+            DELETE FROM message_puzzles WHERE puzzle_id = {puzzle_id};
+            DELETE FROM puzzles WHERE id = {puzzle_id};
+            COMMIT;
+            """
+        )
+    except Exception:
+        await conn.rollback()
+        raise
+
+    return {
+        "user_puzzles": user_puzzles,
+        "message_puzzles": message_puzzles,
+    }
