@@ -518,7 +518,7 @@ class PuzzleBot(discord.Client):
         puzzle_id = row["id"]
         author = row["author"] or "unknown"
         side = "White" if row["to_move"] else "Black"
-        label = f"{side} wins in {ply} (half) moves" if ply is not None else f"{side} to move"
+        label = f"{side} wins in ||{ply}|| (half) moves" if ply is not None else f"{side} to move"
         lines = [
             f"Puzzle {puzzle_id} authored by: {author}",
             f"{label}",
