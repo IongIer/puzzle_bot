@@ -20,6 +20,7 @@ from .service import (
     puzzle_for_message,
     select_puzzle_for_user,
     update_like,
+    update_puzzle_title,
     update_solved,
     user_puzzle_state,
     user_stats,
@@ -76,6 +77,9 @@ class PuzzleBot(discord.Client):
             add_cmd = self.add_command
             add_cmd.binding = self
             self.tree.add_command(add_cmd, guild=guild_obj)
+            title_cmd = self.title_command
+            title_cmd.binding = self
+            self.tree.add_command(title_cmd, guild=guild_obj)
             synced = await self.tree.sync(guild=guild_obj)
             log.info("Synced %s commands to guild %s", len(synced), self.settings.guild_id)
 
@@ -437,6 +441,67 @@ class PuzzleBot(discord.Client):
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
+    @app_commands.command(name="title", description="Set or clear a puzzle title (admin-only)")
+    @app_commands.describe(
+        puzzle_id="Puzzle id to update",
+        title="Title to set (omit or leave blank to clear)",
+    )
+    @app_commands.guild_only()
+    @app_commands.default_permissions(manage_guild=True)
+    async def title_command(
+        self,
+        interaction: discord.Interaction,
+        puzzle_id: int,
+        title: Optional[str] = None,
+    ) -> None:
+        assert self.db is not None
+        if not interaction.guild:
+            await interaction.response.send_message(
+                "This command can only be used in servers.", ephemeral=True
+            )
+            return
+
+        permissions = getattr(interaction.user, "guild_permissions", None)
+        if not permissions or not permissions.manage_guild:
+            await interaction.response.send_message(
+                "You don't have permission to use this command.", ephemeral=True
+            )
+            return
+
+        normalized = title.strip() if title is not None else ""
+        if normalized and len(normalized) > 60:
+            await interaction.response.send_message(
+                "Title must be 60 characters or fewer after trimming whitespace.",
+                ephemeral=True,
+            )
+            return
+
+        normalized_title = normalized or None
+
+        await interaction.response.defer(ephemeral=True)
+        try:
+            updated = await update_puzzle_title(self.db, puzzle_id, normalized_title)
+        except Exception:
+            log.exception("Failed to update title for puzzle %s", puzzle_id)
+            await interaction.followup.send(
+                "Failed to update the puzzle title due to a database error.",
+                ephemeral=True,
+            )
+            return
+
+        if not updated:
+            await interaction.followup.send(f"Puzzle {puzzle_id} not found.", ephemeral=True)
+            return
+
+        if normalized_title:
+            await interaction.followup.send(
+                f"Updated puzzle {puzzle_id} title.", ephemeral=True
+            )
+        else:
+            await interaction.followup.send(
+                f"Cleared puzzle {puzzle_id} title.", ephemeral=True
+            )
+
     def _trim_post_cooldowns(self, now: float, *, max_age: float = 3600) -> None:
         # Drop stale entries so the cooldown cache doesn't grow unbounded.
         expired = [uid for uid, ts in self._post_cooldowns.items() if now - ts > max_age]
@@ -519,8 +584,13 @@ class PuzzleBot(discord.Client):
         author = row["author"] or "unknown"
         side = "White" if row["to_move"] else "Black"
         label = f"{side} wins in ||{ply}|| (half) moves" if ply is not None else f"{side} to move"
+        title = (row["title"] or "").strip()
+        if title:
+            header = f"Puzzle {puzzle_id} '{title}' authored by: {author}"
+        else:
+            header = f"Puzzle {puzzle_id} authored by: {author}"
         lines = [
-            f"Puzzle {puzzle_id} authored by: {author}",
+            header,
             f"{label}",
             f"solution: ||{solution_display}||",
             f"global: {attempts} attempts / {solves} solves | votes: {likes} 👍 / {dislikes} 👎",

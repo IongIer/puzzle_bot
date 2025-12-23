@@ -285,3 +285,19 @@ async def delete_puzzle(conn: aiosqlite.Connection, puzzle_id: int) -> Optional[
         "user_puzzles": user_puzzles,
         "message_puzzles": message_puzzles,
     }
+
+
+async def update_puzzle_title(
+    conn: aiosqlite.Connection, puzzle_id: int, title: Optional[str]
+) -> bool:
+    async with conn.execute("SELECT 1 FROM puzzles WHERE id = ?", (puzzle_id,)) as cur:
+        exists = await cur.fetchone()
+        if not exists:
+            return False
+
+    await conn.execute(
+        "UPDATE puzzles SET title = ? WHERE id = ?",
+        (title, puzzle_id),
+    )
+    await conn.commit()
+    return True

@@ -11,6 +11,7 @@ class PuzzleRecord:
     uhp: str
     solution: str
     ply: Optional[int]
+    title: Optional[str] = None
     author: str = ""
     to_move: bool = True
 
@@ -32,6 +33,7 @@ async def ensure_schema(conn: aiosqlite.Connection) -> None:
             uhp TEXT NOT NULL UNIQUE,
             solution TEXT NOT NULL,
             ply INTEGER,
+            title TEXT,
             author TEXT DEFAULT '',
             to_move INTEGER DEFAULT 1,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -66,6 +68,8 @@ async def ensure_schema(conn: aiosqlite.Connection) -> None:
     # Add author column if migrating an existing DB
     async with conn.execute("PRAGMA table_info(puzzles)") as cur:
         columns = [row[1] for row in await cur.fetchall()]
+        if "title" not in columns:
+            await conn.execute("ALTER TABLE puzzles ADD COLUMN title TEXT")
         if "author" not in columns:
             await conn.execute("ALTER TABLE puzzles ADD COLUMN author TEXT DEFAULT ''")
         if "to_move" not in columns:
@@ -200,8 +204,8 @@ async def upsert_puzzles(conn: aiosqlite.Connection, puzzles: Iterable[PuzzleRec
 
     await conn.executemany(
         """
-        INSERT INTO puzzles (uhp, solution, ply, author, to_move)
-        VALUES (:uhp, :solution, :ply, :author, :to_move)
+        INSERT INTO puzzles (uhp, solution, ply, title, author, to_move)
+        VALUES (:uhp, :solution, :ply, :title, :author, :to_move)
         ON CONFLICT(uhp) DO NOTHING
         """,
         [row.__dict__ for row in rows],
